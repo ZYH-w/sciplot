@@ -57,7 +57,7 @@ dialog{border:1px solid #e0e9e2;box-shadow:0 24px 100px #15392635;border-radius:
   <footer class="status-bar"><span>简图 SciPlot <b>2.0</b><span class="status-divider">|</span>为专注研究的你而作</span><span>CSV · TXT · XLSX · XLS · ODS <span class="status-divider">|</span><span id="footer-points"></span></span></footer>
   <input type="file" id="data-file" accept=".csv,.tsv,.txt,.dat,.xlsx,.xls,.xlsm,.ods,.json" hidden><input type="file" id="project-file" accept=".json,.sciplot" hidden>
   <dialog id="modal"><div id="modal-content"></div></dialog><div id="toast" role="status" aria-live="polite"></div><div id="drop-overlay" hidden><div><strong>松开，开始绘图</strong><span>Excel、CSV、TXT、TSV、ODS 或 JSON</span></div></div>
-<!-- SciPlot standalone source 4efd838ec8ca35ed. Fully local; no installation or network required. -->
+<!-- SciPlot standalone source 7333a0721353c335. Fully local; no installation or network required. -->
 <script type="text/plain" id="sheetjs-license">                                 Apache License
                            Version 2.0, January 2004
                         http://www.apache.org/licenses/
@@ -3049,7 +3049,7 @@ document.addEventListener('change',async e=>{
 });
 document.addEventListener('input',e=>{const el=e.target;if(el.type==='range'&&el.dataset.bind){const out=el.parentElement.querySelector('output');if(out)out.textContent=`${el.value} pt`;}if(el.id==='export-filename')exportSettings.filename=el.value;if(el.id==='paste-input'&&importContext){importContext.text=el.value;parseVersion++;invalidateImportPreview(importContext);}});
 $('#modal').addEventListener('click',e=>{if(e.target===$('#modal')){const r=e.target.getBoundingClientRect();if(e.clientX<r.left||e.clientX>r.right||e.clientY<r.top||e.clientY>r.bottom)closeModal();}});
-$('#modal').addEventListener('cancel',()=>{importContext=null;parseVersion++;});
+$('#modal').addEventListener('cancel',e=>{e.preventDefault();closeModal();});
 document.addEventListener('keydown',e=>{if(e.key==='Escape'&&ui.selecting){ui.selecting=false;renderChart();}if(e.target.closest('[data-series]')&&(e.key==='Enter'||e.key===' ')){e.preventDefault();e.target.closest('[data-series]').click();}const editing=e.target.matches('input,textarea,select,[contenteditable]')||$('#modal').open;if((e.ctrlKey||e.metaKey)&&!editing){if(e.key.toLowerCase()==='s'){e.preventDefault();saveProject();}if(e.key.toLowerCase()==='z'){e.preventDefault();$(`[data-action="${e.shiftKey?'redo':'undo'}"]`).click();}}});
 let dragDepth=0;document.addEventListener('dragenter',e=>{if([...e.dataTransfer.types].includes('Files')){e.preventDefault();dragDepth++;$('#drop-overlay').hidden=false;}});document.addEventListener('dragover',e=>{if([...e.dataTransfer.types].includes('Files'))e.preventDefault();});document.addEventListener('dragleave',e=>{if([...e.dataTransfer.types].includes('Files')&&--dragDepth<=0){dragDepth=0;$('#drop-overlay').hidden=true;}});document.addEventListener('drop',async e=>{if(!e.dataTransfer.files.length)return;e.preventDefault();dragDepth=0;$('#drop-overlay').hidden=true;const files=[...e.dataTransfer.files];await loadFile(files[0]);if(files.length>1)notify('当前预览第一个文件；可依次导入其他文件。');});
 let selection=null;
