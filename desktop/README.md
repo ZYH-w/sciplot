@@ -1,6 +1,6 @@
 # 简图 SciPlot Windows 桌面版
 
-解压 Windows 发布包后，打开 `SciPlot-Windows` 文件夹并双击 `SciPlot.exe`。请保留同目录中的 DLL 和配置文件，不要只复制 EXE。应用在独立窗口中运行，使用时不需要 Node.js、浏览器标签页或联网加载前端依赖。
+解压 Windows 发布包后，打开 `SciPlot-Windows-v2` 文件夹并双击 `SciPlot.exe`。请保留同目录中的 DLL 和配置文件，不要只复制 EXE。应用在独立窗口中运行，使用时不需要 Node.js、浏览器标签页或联网加载前端依赖。
 
 ## 系统要求
 
@@ -22,11 +22,11 @@
 在项目根目录执行：
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File desktop/build-windows.ps1
+powershell -ExecutionPolicy Bypass -File desktop/build-windows.ps1 -OutputName SciPlot-Windows-v2
 ```
 
 构建环境需要 Node.js 20 或更新版本和 Windows 自带的 .NET Framework C# 编译器。脚本会重新生成独立 HTML，再将页面作为资源内嵌进 EXE。Node.js 仅用于构建，最终使用者无需安装。
 
 WebView2 SDK 锁定为 `Microsoft.Web.WebView2 1.0.4314.35`，由构建脚本从 NuGet 官方源取得。首次构建需要联网下载 SDK；本地缓存可供后续构建复用。NuGet 包缓存和生成的发布文件不应提交到源码仓库。前端所需的 SheetJS 是随项目提供的本地资源，应用运行时无需从 CDN 下载。
 
-产物位于 `release/SciPlot-Windows/SciPlot.exe`，以及同级生成的 ZIP 发布包。`create-icon.ps1` 使用 System.Drawing 生成多分辨率 ICO 和 PNG，`app.manifest` 声明普通用户权限与高 DPI 支持，`App.config` 配置 .NET Framework 4.8。
+产物位于 `release/SciPlot-Windows-v2/SciPlot.exe`，以及同级生成的 ZIP 发布包。`create-icon.ps1` 使用 System.Drawing 生成多分辨率 ICO 和 PNG，`app.manifest` 声明普通用户权限与高 DPI 支持，`App.config` 配置 .NET Framework 4.8。

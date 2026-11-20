@@ -1,5 +1,5 @@
 ﻿[CmdletBinding()]
-param([switch]$SkipWebBuild, [switch]$NoZip)
+param([switch]$SkipWebBuild, [switch]$NoZip, [ValidatePattern('^SciPlot-[A-Za-z0-9-]+$')][string]$OutputName = 'SciPlot-Windows')
 
 $ErrorActionPreference = 'Stop'
 $desktopRoot = [System.IO.Path]::GetFullPath($PSScriptRoot)
@@ -10,7 +10,7 @@ $packageDirectory = Join-Path $desktopRoot '.packages'
 $packagePath = Join-Path $packageDirectory "microsoft.web.webview2.$sdkVersion.nupkg"
 $sdkDirectory = Join-Path $packageDirectory "Microsoft.Web.WebView2.$sdkVersion"
 $releaseRoot = Join-Path $projectRoot 'release'
-$outputDirectory = Join-Path $releaseRoot 'SciPlot-Windows'
+$outputDirectory = Join-Path $releaseRoot $OutputName
 $compilerPath = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
 $standalonePath = Join-Path $projectRoot '简图-SciPlot.html'
 
@@ -82,7 +82,7 @@ Copy-Item -LiteralPath (Join-Path $sdkDirectory 'NOTICE.txt') -Destination (Join
 Copy-Item -LiteralPath (Join-Path $projectRoot 'assets/SHEETJS-LICENSE.txt') -Destination $licensesDirectory -Force
 
 $buildInformation = @{
-    application = '简图 SciPlot'; version = '1.0.0'; architecture = 'x64'; framework = '.NET Framework 4.8'
+    application = '简图 SciPlot'; version = '2.0.0'; architecture = 'x64'; framework = '.NET Framework 4.8'
     webView2Sdk = $sdkVersion; webView2PackageSha256 = $sdkChecksum
     embeddedHtmlSha256 = (Get-FileHash -LiteralPath $standalonePath -Algorithm SHA256).Hash
     executableSha256 = (Get-FileHash -LiteralPath $executablePath -Algorithm SHA256).Hash
@@ -90,10 +90,10 @@ $buildInformation = @{
 $buildInformation | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $outputDirectory 'build-info.json') -Encoding UTF8
 Write-Host "已生成 Windows x64 桌面应用：$executablePath"
 if (-not $NoZip) {
-    $zipPath = Join-Path $releaseRoot 'SciPlot-Windows-x64.zip'
+    $zipPath = Join-Path $releaseRoot "$OutputName-x64.zip"
     Compress-Archive -LiteralPath $outputDirectory -DestinationPath $zipPath -Force
     $zipHash = (Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash
-    "$zipHash  SciPlot-Windows-x64.zip" | Set-Content -LiteralPath (Join-Path $releaseRoot 'SHA256SUMS.txt') -Encoding ASCII
+    "$zipHash  $OutputName-x64.zip" | Set-Content -LiteralPath (Join-Path $releaseRoot 'SHA256SUMS.txt') -Encoding ASCII
     Write-Host "已打包：$zipPath"
     Write-Host "SHA256: $zipHash"
 }

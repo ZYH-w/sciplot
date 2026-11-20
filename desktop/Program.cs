@@ -14,8 +14,8 @@ using Microsoft.Web.WebView2.WinForms;
 [assembly: AssemblyTitle("简图 SciPlot")]
 [assembly: AssemblyDescription("本地科研绘图与数据处理工作台")]
 [assembly: AssemblyProduct("SciPlot")]
-[assembly: AssemblyVersion("1.0.0.0")]
-[assembly: AssemblyFileVersion("1.0.0.0")]
+[assembly: AssemblyVersion("2.0.0.0")]
+[assembly: AssemblyFileVersion("2.0.0.0")]
 
 namespace SciPlot.Desktop
 {
