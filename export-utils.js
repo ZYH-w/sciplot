@@ -1,4 +1,5 @@
 import { renderPlot } from './plot-engine.js';
+import { resolveFigureOptions, addPngDpi, encodeTiffRGB } from './publication-utils.js';
 
 let activePrintCleanup = null;
 
@@ -35,23 +36,22 @@ export function downloadBlob(blob, name) {
   return true;
 }
 
-function makeSvg(state, width, background) {
-  const markup = renderPlot(state, { width: 900, height: 620, interactive: false });
+function makeSvg(state, figure, raster = false) {
+  const logicalWidth = 900, logicalHeight = logicalWidth * figure.heightMM / figure.widthMM;
+  const markup = renderPlot({ ...state, figure: { ...(state.figure || {}), ...figure } }, { width: logicalWidth, height: logicalHeight, interactive: false });
   const documentSvg = new DOMParser().parseFromString(markup, 'image/svg+xml');
   if (documentSvg.querySelector('parsererror')) throw new Error('图形内容无法生成 SVG，请检查图表设置。');
   const root = documentSvg.documentElement;
-  const height = Math.round(width * 620 / 900);
-  root.setAttribute('width', String(width));
-  root.setAttribute('height', String(height));
-  root.setAttribute('viewBox', '0 0 900 620');
-  const color = typeof background === 'string' && globalThis.CSS?.supports('color', background) ? background : '#fff';
+  root.setAttribute('width', raster ? String(figure.widthPx) : `${figure.widthMM}mm`);
+  root.setAttribute('height', raster ? String(figure.heightPx) : `${figure.heightMM}mm`);
+  const color = figure.background;
   root.setAttribute('style', `background:${color}`);
   const backgroundRect = Array.from(root.children).find(child => child.localName === 'rect');
   if (backgroundRect) backgroundRect.setAttribute('fill', color);
-  return { markup: new XMLSerializer().serializeToString(root), width, height };
+  return { markup: new XMLSerializer().serializeToString(root), width: figure.widthPx, height: figure.heightPx, figure };
 }
 
-async function rasterizeSvg(svg) {
+async function rasterizeSvg(svg, format) {
   const url = URL.createObjectURL(new Blob([svg.markup], { type: 'image/svg+xml;charset=utf-8' }));
   const canvas = document.createElement('canvas');
   canvas.width = svg.width;
@@ -72,10 +72,16 @@ async function rasterizeSvg(svg) {
     const context = canvas.getContext('2d');
     if (!context) throw new Error('当前浏览器不支持图片导出，请使用 SVG 格式。');
     context.drawImage(picture, 0, 0, svg.width, svg.height);
-    return await new Promise((resolve, reject) => canvas.toBlob(blob => {
+    if (format === 'tiff') {
+      const data = context.getImageData(0, 0, svg.width, svg.height).data;
+      const bytes = encodeTiffRGB({ width: svg.width, height: svg.height, data, dpi: svg.figure.dpi, background: svg.figure.background });
+      return new Blob([bytes], { type: 'image/tiff' });
+    }
+    const png = await new Promise((resolve, reject) => canvas.toBlob(blob => {
       if (blob) resolve(blob);
       else reject(new Error('PNG 生成失败，请降低导出尺寸后重试。'));
     }, 'image/png'));
+    return new Blob([addPngDpi(await png.arrayBuffer(), svg.figure.dpi)], { type: 'image/png' });
   } catch (error) {
     if (error.name === 'SecurityError') throw new Error('浏览器阻止了图片导出，请使用 SVG 格式。');
     throw error;
@@ -101,11 +107,13 @@ async function printFigure(svg, filename) {
   surface.id = 'print-surface';
   surface.style.display = 'none';
   surface.innerHTML = svg.markup;
+  const { widthMM, heightMM } = svg.figure;
+  const printStyle = document.createElement('style');
+  printStyle.media = 'print';
+  printStyle.textContent = `@page{size:${widthMM}mm ${heightMM}mm;margin:0}html,body{margin:0!important;padding:0!important;width:${widthMM}mm!important;height:${heightMM}mm!important}#print-surface{display:block!important;width:${widthMM}mm!important;height:${heightMM}mm!important;overflow:hidden!important;break-inside:avoid}#print-surface svg{display:block!important;width:${widthMM}mm!important;height:${heightMM}mm!important;max-height:none!important;max-width:none!important}`;
+  document.head.appendChild(printStyle);
   const printedSvg = surface.querySelector('svg');
   if (printedSvg) {
-    // A full-width 900:620 chart is slightly taller than the A4 landscape
-    // printable area with 12 mm margins. Bound its height to keep one page.
-    printedSvg.style.maxHeight = '180mm';
     printedSvg.setAttribute('preserveAspectRatio', 'xMidYMid meet');
   }
   document.body.appendChild(surface);
@@ -115,6 +123,7 @@ async function printFigure(svg, filename) {
   const cleanup = () => {
     clearTimeout(fallbackTimer);
     surface.remove();
+    printStyle.remove();
     document.title = previousTitle;
     window.removeEventListener('afterprint', cleanup);
     for (const { dialog, modal, content } of dialogs) {
@@ -138,22 +147,30 @@ async function printFigure(svg, filename) {
   }
 }
 
-/** Export a figure. PDF opens the browser print dialog (choose Save as PDF). */
-export async function exportFigure(state, options = {}) {
-  const { format = 'svg', width = 2400, filename = '科研图表', background = '#fff' } = options;
-  if (!['svg', 'png', 'pdf'].includes(format)) throw new Error('请选择 SVG、PNG 或 PDF 导出格式。');
-  const outputWidth = Math.round(Number(width));
-  if (!Number.isFinite(outputWidth) || outputWidth < 1 || outputWidth > 100000) throw new Error('请输入有效的导出宽度。');
-  if (format === 'png' && (outputWidth < 600 || outputWidth > 8000)) throw new Error('PNG 导出宽度需在 600 到 8000 像素之间。');
-  const name = safeFilename(filename).replace(/\.(?:svg|png|pdf)$/i, '').slice(0, 110);
+/** Build a downloadable vector/raster artifact without triggering a download. */
+export async function createFigureBlob(state, options = {}) {
+  const format = options.format === 'tif' ? 'tiff' : options.format || 'svg';
+  if (!['svg', 'png', 'tiff'].includes(format)) throw new Error('批量文件支持 SVG、PNG、TIFF；PDF 请使用单图打印。');
+  const figure = resolveFigureOptions(state, options);
   if (document.fonts?.ready) await document.fonts.ready;
-  const svg = makeSvg(state, outputWidth, background);
+  const svg = makeSvg(state, figure, format !== 'svg');
   if (format === 'svg') {
-    downloadBlob(new Blob(['<?xml version="1.0" encoding="UTF-8"?>\n', svg.markup], { type: 'image/svg+xml;charset=utf-8' }), `${name}.svg`);
-  } else if (format === 'png') {
-    downloadBlob(await rasterizeSvg(svg), `${name}.png`);
+    return { blob: new Blob(['<?xml version="1.0" encoding="UTF-8"?>\n', svg.markup], { type: 'image/svg+xml;charset=utf-8' }), extension: 'svg', figure };
+  }
+  return { blob: await rasterizeSvg(svg, format), extension: format === 'tiff' ? 'tif' : 'png', figure };
+}
+
+/** Export exact physical dimensions; PDF opens the system print dialog. */
+export async function exportFigure(state, options = {}) {
+  const format = options.format || 'svg';
+  const name = safeFilename(options.filename || '科研图表').replace(/\.(?:svg|png|pdf|tiff?)$/i, '').slice(0, 110);
+  if (format === 'pdf') {
+    const figure = resolveFigureOptions(state, options);
+    if (document.fonts?.ready) await document.fonts.ready;
+    await printFigure(makeSvg(state, figure), name);
   } else {
-    await printFigure(svg, name);
+    const result = await createFigureBlob(state, options);
+    downloadBlob(result.blob, `${name}.${result.extension}`);
   }
   return true;
 }

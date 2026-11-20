@@ -1,6 +1,10 @@
 @echo off
 chcp 65001 >nul
 cd /d "%~dp0"
+if exist "%~dp0release\SciPlot-Windows-v2\SciPlot.exe" (
+  start "" "%~dp0release\SciPlot-Windows-v2\SciPlot.exe"
+  exit /b 0
+)
 if exist "%~dp0release\SciPlot-Windows\SciPlot.exe" (
   start "" "%~dp0release\SciPlot-Windows\SciPlot.exe"
   exit /b 0

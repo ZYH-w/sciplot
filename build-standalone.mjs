@@ -6,7 +6,7 @@ import { createHash } from 'node:crypto';
 
 const root = path.dirname(fileURLToPath(import.meta.url));
 const outputName = '简图-SciPlot.html';
-const moduleFiles = ['data-core.js', 'plot-engine.js', 'excel-import.js', 'export-utils.js', 'data-processing.js', 'processing-ui.js', 'app.js'];
+const moduleFiles = ['data-core.js', 'plot-engine.js', 'excel-import.js', 'export-utils.js', 'data-processing.js', 'processing-ui.js', 'publication-utils.js', 'analysis-core.js', 'analysis-ui.js', 'worksheet-ui.js', 'figure-editor.js', 'batch-core.js', 'batch-ui.js', 'app.js'];
 const assetFiles = ['index.html', 'style.css', 'favicon.svg', 'assets/xlsx.full.min.js', 'assets/SHEETJS-LICENSE.txt'];
 const sources = new Map(await Promise.all([...moduleFiles, ...assetFiles].map(async name => [name, await readFile(path.join(root, name), 'utf8')])));
 const moduleInfo = new Map();

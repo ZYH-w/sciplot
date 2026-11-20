@@ -236,6 +236,9 @@ function projectBounds(value) {
 /** Validate and normalize external JSON, retaining only supported project fields. */
 export function validateProject(value) {
   if (!isRecord(value)) throw new Error('项目文件格式不正确。');
+  const hex = (v, fallback, label) => {const c=v===undefined?fallback:v;if(typeof c!=='string'||!/^#(?:[0-9a-f]{3}|[0-9a-f]{6})$/i.test(c))throw new Error(`${label}必须为十六进制颜色。`);return c.length===4?'#'+[...c.slice(1)].map(ch=>ch+ch).join(''):c;};
+  const integer = (v, fallback, lo, hi, label) => {const n=projectNumber(v,fallback,lo,hi,label);if(!Number.isInteger(n))throw new Error(`${label}必须为整数。`);return n;};
+  const positiveStep = (v,label) => {const n=projectBound(v);if(n!==''&&n<=0)throw new Error(`${label}必须大于 0 或留空。`);return n;};
   if (value.schemaVersion !== 1) throw new Error('不支持此项目版本，请使用简图导出的版本 1 项目文件。');
   const dataset = value.dataset;
   if (!isRecord(dataset) || !Array.isArray(dataset.columns) || !Array.isArray(dataset.rows)) throw new Error('项目缺少有效的数据表。');
@@ -244,6 +247,7 @@ export function validateProject(value) {
   if (dataset.rows.length < 2 || dataset.rows.length > MAX_ROWS) throw new Error(`项目数据表需包含 2–${MAX_ROWS.toLocaleString('en-US')} 行。`);
   if (dataset.rows.some(row => !Array.isArray(row) || row.length !== dataset.columns.length || row.some(cell => cell !== null && (typeof cell !== 'number' || !Number.isFinite(cell))))) throw new Error('项目中包含不合法的数值或列数不一致的数据行。');
   const datasetName = projectText(dataset.name, '导入数据', '项目数据名称');
+  const errorColumn = (v,label) => v===undefined||v===null||v===''?null:integer(v,null,0,dataset.columns.length-1,label);
   if (!Array.isArray(value.series) || value.series.length > 30 || value.series.length === 0) throw new Error('项目需包含 1–30 条曲线。');
   const seriesIds = new Set();
   const normalizedSeries = value.series.map((series, index) => {
@@ -262,14 +266,47 @@ export function validateProject(value) {
       visible: projectBoolean(series.visible, true, '曲线可见性'),
       dash: projectChoice(series.dash, 'solid', ['solid', 'dashed', 'dotted', 'dashdot'], '曲线线型'),
       marker: projectChoice(series.marker, ['circle', 'square', 'triangle', 'diamond'][index % 4], ['circle', 'square', 'triangle', 'diamond', 'none'], '曲线标记'),
+      axis: projectChoice(series.axis,'left',['left','right'],'曲线 Y 轴'),
+      panel: integer(series.panel,0,0,3,'子图编号'),
+      opacity: projectNumber(series.opacity,1,0,1,'曲线透明度'),
+      fill: projectBoolean(series.fill,false,'曲线填充'),
+      fillOpacity: projectNumber(series.fillOpacity,.12,0,1,'填充透明度'),
+      markerFill: projectChoice(series.markerFill,'white',['white','series'],'标记填充'),
+      markerEvery: integer(series.markerEvery,0,0,50000,'标记间隔'),
+      xErrorColumn: errorColumn(series.xErrorColumn,'X 误差列'),
+      yErrorColumn: errorColumn(series.yErrorColumn,'Y 误差列'),
+      yErrorMinusColumn: errorColumn(series.yErrorMinusColumn,'负向 Y 误差列'),
+      yErrorPlusColumn: errorColumn(series.yErrorPlusColumn,'正向 Y 误差列'),
+      errorStyle: projectChoice(series.errorStyle,'none',['none','bars','band'],'误差显示方式'),
+      errorCap: projectNumber(series.errorCap,5,0,20,'误差棒端帽宽度'),
     };
   });
-  for (const key of ['axes', 'legend', 'inset', 'axisBreak']) {
+  for (const key of ['axes', 'legend', 'inset', 'axisBreak', 'figure', 'layout']) {
     if (value[key] !== undefined && !isRecord(value[key])) throw new Error(`项目 ${key} 配置格式不正确。`);
   }
   const axes = value.axes || {};
   const legend = value.legend || {}, inset = value.inset || {}, axisBreak = value.axisBreak || {};
-  const positions = ['top-left', 'top-right', 'bottom-left', 'bottom-right'];
+  const positions = ['top-left', 'top-right', 'bottom-left', 'bottom-right', 'custom'];
+  const figure=value.figure||{},layout=value.layout||{};
+  if(layout.panelNames!==undefined&&(!Array.isArray(layout.panelNames)||layout.panelNames.length>4))throw new Error('子图名称需为最多 4 项的文字列表。');
+  const extraAxes={};
+  for(const axis of ['x','y','y2']){
+    extraAxes[axis+'Scale']=projectChoice(axes[axis+'Scale'],'linear',['linear','log'],`${axis} 轴比例`);
+    extraAxes[axis+'Reverse']=projectBoolean(axes[axis+'Reverse'],false,`${axis} 轴反向`);
+    extraAxes[axis+'Step']=positiveStep(axes[axis+'Step'],`${axis} 轴主刻度间隔`);
+    extraAxes[axis+'Format']=projectChoice(axes[axis+'Format'],'auto',['auto','fixed','scientific'],`${axis} 轴数字格式`);
+    const lo=projectBound(axes[axis+'Min']),hi=projectBound(axes[axis+'Max']);
+    if(lo!==''&&hi!==''&&lo>=hi)throw new Error('坐标范围起点必须小于终点。');
+    if(extraAxes[axis+'Scale']==='log'&&((lo!==''&&lo<=0)||(hi!==''&&hi<=0)))throw new Error('对数坐标范围必须大于 0。');
+    if(axis==='y2'){extraAxes.y2Min=lo;extraAxes.y2Max=hi;}
+  }
+  const annotationIds=new Set();
+  if(value.annotations!==undefined&&(!Array.isArray(value.annotations)||value.annotations.length>100))throw new Error('注释列表最多支持 100 个对象。');
+  const annotations=(value.annotations||[]).map((n,i)=>{
+    if(!isRecord(n))throw new Error('注释对象格式不正确。');
+    const id=n.id??`annotation-${i+1}`;if(typeof id!=='string'||!/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,99}$/.test(id)||annotationIds.has(id))throw new Error('注释标识必须合法且不重复。');annotationIds.add(id);
+    return {id,type:projectChoice(n.type,'text',['text','arrow','line','rect','hline','vline','bracket'],'注释类型'),text:projectText(n.text,'','注释文字',1000),x:projectNumber(n.x,50,0,100,'注释 X'),y:projectNumber(n.y,50,0,100,'注释 Y'),x2:projectNumber(n.x2,70,0,100,'注释 X2'),y2:projectNumber(n.y2,60,0,100,'注释 Y2'),value:projectNumber(n.value,0,-Number.MAX_VALUE,Number.MAX_VALUE,'参考线数值'),color:hex(n.color,'#333333','注释颜色'),fontSize:projectNumber(n.fontSize,16,6,72,'注释字号'),width:projectNumber(n.width,1.5,.1,10,'注释线宽'),dash:projectChoice(n.dash,'solid',['solid','dashed','dotted'],'注释线型'),fill:n.fill===undefined||n.fill==='none'?'none':hex(n.fill,'#ffffff','注释填充'),panel:integer(n.panel,0,0,3,'注释子图'),axis:projectChoice(n.axis,'left',['left','right'],'注释 Y 轴'),angle:projectNumber(n.angle,0,0,360,'注释旋转角度')};
+  });
   const from = projectBound(axisBreak.from, 10), to = projectBound(axisBreak.to, 14);
   const breakEnabled = projectBoolean(axisBreak.enabled, false, '断轴开关');
   if (breakEnabled && (from === '' || to === '' || from >= to)) throw new Error('断轴范围需要两个有效数值，且起点必须小于终点。');
@@ -284,6 +321,7 @@ export function validateProject(value) {
     palette: projectChoice(value.palette, 'journal', ['journal', 'nature', 'accessible', 'reference', 'mono', 'vivid'], '配色'),
     axes: {
       ...projectBounds(axes),
+      ...extraAxes,
       xLabel: projectText(axes.xLabel, dataset.columns[normalizedSeries[0].xColumn], 'X 轴标题'),
       yLabel: projectText(axes.yLabel, normalizedSeries.length === 1 ? normalizedSeries[0].name : '数值', 'Y 轴标题'),
       fontFamily: projectText(axes.fontFamily, 'Times New Roman', '图表字体'),
@@ -291,17 +329,40 @@ export function validateProject(value) {
       grid: projectBoolean(axes.grid, true, '网格线开关'),
       minorTicks: projectBoolean(axes.minorTicks, true, '次刻度开关'),
       frame: projectBoolean(axes.frame, true, '坐标边框开关'),
+      y2Label: projectText(axes.y2Label,'Y₂','右 Y 轴标题'),
+      digits: integer(axes.digits,2,0,10,'数字小数位'),
+      titleSize: projectNumber(axes.titleSize,21,6,96,'图标题字号'),
+      labelSize: projectNumber(axes.labelSize,20,6,72,'坐标标题字号'),
+      axisWidth: projectNumber(axes.axisWidth,1.1,.2,6,'坐标线宽'),
+      tickDirection: projectChoice(axes.tickDirection,'in',['in','out','both'],'刻度方向'),
+      tickColor: hex(axes.tickColor,'#384149','刻度颜色'),
+      axisColor: hex(axes.axisColor,'#384149','坐标颜色'),
+      gridColor: hex(axes.gridColor,'#e5e8eb','网格颜色'),
+      gridWidth: projectNumber(axes.gridWidth,.6,.1,5,'网格线宽'),
+      titleColor:hex(axes.titleColor,'#26323a','图标题颜色'),labelColor:hex(axes.labelColor,'#252b31','坐标标题颜色'),
+      xLabelOffset:projectNumber(axes.xLabelOffset,0,-50,50,'X 标题偏移'),yLabelOffset:projectNumber(axes.yLabelOffset,0,-50,50,'Y 标题偏移'),y2LabelOffset:projectNumber(axes.y2LabelOffset,0,-50,50,'右 Y 标题偏移'),
     },
     legend: {
       show: projectBoolean(legend.show, true, '图例开关'),
       border: projectBoolean(legend.border, false, '图例边框'),
       position: projectChoice(legend.position, 'top-left', positions, '图例位置'),
+      fontSize: projectNumber(legend.fontSize,16,6,48,'图例字号'),
+      background: hex(legend.background,'#ffffff','图例背景'),
+      opacity: projectNumber(legend.opacity,.94,0,1,'图例背景透明度'),
+      x: projectNumber(legend.x,5,0,100,'图例 X'),y:projectNumber(legend.y,5,0,100,'图例 Y'),
+      textColor:hex(legend.textColor,'#30383d','图例文字颜色'),borderColor:hex(legend.borderColor,'#69717a','图例边框颜色'),
     },
     inset: {
       ...projectBounds(inset),
       enabled: projectBoolean(inset.enabled, false, '局部放大开关'),
       position: projectChoice(inset.position, 'top-right', positions, '局部放大位置'),
+      width: projectNumber(inset.width,30,10,80,'局部图宽度'),height:projectNumber(inset.height,30,10,80,'局部图高度'),
+      x:projectNumber(inset.x,65,0,100,'局部图 X'),y:projectNumber(inset.y,8,0,100,'局部图 Y'),
+      title:projectText(inset.title,'局部放大','局部图标题'),
     },
     axisBreak: { enabled: breakEnabled, from, to },
+    figure:{widthMM:projectNumber(figure.widthMM,90,20,500,'图宽（mm）'),heightMM:projectNumber(figure.heightMM,62,20,500,'图高（mm）'),dpi:integer(figure.dpi,600,72,1200,'导出 DPI'),background:hex(figure.background,'#ffffff','页面背景')},
+    layout:{mode:projectChoice(layout.mode,'single',['single','vertical','grid'],'子图布局'),shareX:projectBoolean(layout.shareX,false,'共享 X 范围'),panelLabels:projectBoolean(layout.panelLabels,true,'子图编号'),panelNames:Array.from({length:4},(_,i)=>projectText(Array.isArray(layout.panelNames)?layout.panelNames[i]:undefined,`(${String.fromCharCode(97+i)})`,'子图名称',100))},
+    annotations,
   };
 }

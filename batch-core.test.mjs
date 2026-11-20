@@ -1,0 +1,6 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { mapTemplateToDataset,createZip } from './batch-core.js';
+const template={schemaVersion:1,dataset:{name:'a',columns:['t','y'],rows:[[0,1],[1,2]]},series:[{id:'s',xColumn:0,yColumn:1}],axes:{xMin:0,xMax:1},axisBreak:{enabled:false},inset:{enabled:false}};
+test('batch remaps by column name without mutating template',()=>{const ds={name:'b',columns:['y','t'],rows:[[5,2],[6,3]]};const result=mapTemplateToDataset(template,ds);assert.equal(result.series[0].xColumn,1);assert.equal(result.series[0].yColumn,0);assert.equal(result.axes.xMin,'');assert.equal(template.series[0].xColumn,0);assert.throws(()=>mapTemplateToDataset(template,{...ds,columns:['z','t']}),/缺少/);});
+test('ZIP has UTF-8 names, correct local and central size and CRC',async()=>{const b=new Uint8Array(await createZip([{name:'测试.txt',data:'123456789'}]).arrayBuffer()),v=new DataView(b.buffer);assert.equal(v.getUint32(0,true),0x04034b50);assert.equal(v.getUint16(6,true),0x800);assert.equal(v.getUint32(14,true),0xcbf43926);assert.equal(v.getUint32(b.length-22,true),0x06054b50);assert.equal(v.getUint16(b.length-12,true),1);assert.throws(()=>createZip([{name:'../x',data:'a'}]),/无效/);});

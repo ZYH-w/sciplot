@@ -123,3 +123,81 @@ test('line-scatter with no markers keeps markers disabled at missing boundaries'
   const state=example();state.series[0].marker='none';state.dataset.rows=[[0,1],[1,null],[2,3]];
   assert.match(renderPlot(state),/<g data-series-markers="a"><\/g>/);
 });
+
+test('logarithmic axes map equal ratios to equal distances and reject nonpositive limits',()=>{
+ const s=example();s.dataset.rows=[[1,1],[10,10],[100,100]];Object.assign(s.axes,{xScale:'log',yScale:'log',xMin:1,xMax:100,yMin:1,yMax:100});
+ const path=renderPlot(s).match(/<path data-series-id="a" d="([^"]*)"/)[1];
+ const points=[...path.matchAll(/[ML]([\d.-]+),([\d.-]+)/g)].map(m=>[+m[1],+m[2]]);
+ assert.ok(Math.abs(points[1][0]-(points[0][0]+points[2][0])/2)<.002);assert.ok(Math.abs(points[1][1]-(points[0][1]+points[2][1])/2)<.002);
+ s.axes.xMin=0;assert.throws(()=>renderPlot(s),/对数/);
+});
+
+test('reverse axes invert geometry without changing stored values',()=>{
+ const s=example();s.axes.xReverse=true;s.axes.yReverse=true;const original=JSON.stringify(s.dataset);
+ const path=renderPlot(s).match(/<path data-series-id="a" d="([^"]*)"/)[1];const p=[...path.matchAll(/[ML]([\d.-]+),([\d.-]+)/g)].map(m=>[+m[1],+m[2]]);
+ assert.ok(p[0][0]>p.at(-1)[0]);assert.ok(p[0][1]<p.at(-1)[1]);assert.equal(JSON.stringify(s.dataset),original);
+});
+
+test('right Y scale is independent and labeled and editable',()=>{
+ const s=example();s.series.push({...s.series[0],id:'right',yColumn:2,axis:'right'});s.dataset.rows=[[0,1,1000],[1,2,2000]];s.axes.y2Label='温度 K';
+ const b=getPlotBounds(s);assert.ok(b.yMax<10);assert.ok(b.y2Max>=2000);
+ const svg=renderPlot(s,{interactive:true});assert.match(svg,/温度 K/);assert.match(svg,/data-edit="y2-label"/);assert.doesNotMatch(svg,/NaN|Infinity/);
+});
+
+test('manual ticks and fixed formatting work, excessive tick counts are rejected',()=>{
+ const s=example();Object.assign(s.axes,{xMin:0,xMax:4,xStep:1,xFormat:'fixed',digits:2});assert.match(renderPlot(s),/>2\.00<\/text>/);
+ s.axes.xStep=.0001;assert.throws(()=>renderPlot(s),/刻度过密/);
+});
+
+test('error bars use symmetric X and asymmetric Y columns and expand auto bounds',()=>{
+ const s=example();s.dataset.rows=[[1,10,2,3,7],[2,15,1,2,4]];Object.assign(s.series[0],{errorStyle:'bars',xErrorColumn:2,yErrorMinusColumn:3,yErrorPlusColumn:4});
+ const b=getPlotBounds(s);assert.equal(b.xMin,-1);assert.equal(b.xMax,3);assert.ok(b.yMin<=7&&b.yMax>=19);assert.match(renderPlot(s),/class="error-bars"/);
+});
+
+test('error band skips missing errors and refuses nonmonotonic X with a visible message',()=>{
+ const s=example();s.dataset.rows=[[0,1,.2],[1,2,.3],[2,3,.5]];Object.assign(s.series[0],{errorStyle:'band',yErrorColumn:2});assert.match(renderPlot(s),/class="error-band"/);
+ s.dataset.rows.push([.5,4,.2]);const svg=renderPlot(s);assert.doesNotMatch(svg,/class="error-band"/);assert.match(svg,/误差带要求单调 X/);
+});
+
+test('negative errors and nonpositive log error endpoints produce a warning',()=>{
+ const s=example();s.dataset.rows=[[1,1,2],[2,3,-1]];Object.assign(s.axes,{yScale:'log'});Object.assign(s.series[0],{errorStyle:'bars',yErrorColumn:2});const svg=renderPlot(s);assert.match(svg,/负误差值/);assert.match(svg,/越界误差端点/);assert.doesNotMatch(svg,/NaN|Infinity/);
+});
+
+test('area fill, opacity, solid markers and explicit marker interval are applied',()=>{
+ const s=example();s.dataset.rows=Array.from({length:20},(_,i)=>[i,i]);Object.assign(s.series[0],{fill:true,fillOpacity:.2,opacity:.5,markerFill:'series',markerEvery:5});const svg=renderPlot(s);
+ assert.match(svg,/class="series-fill"/);assert.match(svg,/opacity="0.5"/);const markers=svg.match(/<g data-series-markers="a">(.*?)<\/g>/)[1];assert.match(markers,/fill="#208E85"/);assert.equal((markers.match(/M/g)||[]).length,5);
+});
+
+test('custom legend and inset dimensions are rendered with interactive hooks',()=>{
+ const s=example();s.legend={show:true,position:'custom',fontSize:13,background:'#ffeecc',opacity:.4,x:70,y:20};s.inset={enabled:true,xMin:1,xMax:3,position:'custom',width:40,height:40,x:20,y:20};const svg=renderPlot(s,{interactive:true});assert.match(svg,/data-edit="legend"/);assert.match(svg,/data-edit="inset"/);assert.match(svg,/fill="#ffeecc"/);assert.doesNotMatch(svg,/NaN|Infinity/);
+});
+
+test('all annotation types render safely and export removes edit hooks',()=>{
+ const s=example();s.title='Editable';s.annotations=['text','arrow','line','rect','hline','vline','bracket'].map((type,i)=>({id:'note'+i,type,text:'<script> & test',value:2,x:30,y:30,x2:70,y2:40,color:'#333333'}));
+ const svg=renderPlot(s,{interactive:true});assert.equal((svg.match(/data-edit="annotation"/g)||[]).length,7);for(const type of ['title','x-label','y-label','x-axis','y-axis','legend','series'])assert.ok(svg.includes(`data-edit="${type}"`));assert.doesNotMatch(svg,/<script>/);assert.match(svg,/&lt;script&gt;/);assert.doesNotMatch(renderPlot(s),/data-edit=|plot-hit-area/);
+});
+
+test('four-panel grid and vertical layouts render all series and shared X bounds',()=>{
+ const s=example();s.series=Array.from({length:4},(_,i)=>({...s.series[0],id:'s'+i,panel:i}));s.layout={mode:'grid',shareX:true,panelLabels:true};let svg=renderPlot(s,{interactive:true});assert.equal((svg.match(/class="plot-panel"/g)||[]).length,4);assert.equal((svg.match(/data-x-min="0"/g)||[]).length,4);
+ s.layout.mode='vertical';svg=renderPlot(s,{interactive:true});assert.equal((svg.match(/class="plot-panel"/g)||[]).length,4);assert.doesNotMatch(svg,/NaN|Infinity/);
+ s.inset={enabled:true};assert.match(renderPlot(s),/多子图暂不支持/);
+});
+
+test('publication dimensions set aspect ratio and explicit render size overrides',()=>{
+ const s=example();s.figure={widthMM:100,heightMM:80,background:'#fafafa'};assert.match(renderPlot(s),/viewBox="0 0 900 720"/);assert.match(renderPlot(s),/fill="#fafafa"/);assert.match(renderPlot(s,{width:760,height:300}),/viewBox="0 0 760 300"/);
+ s.figure={widthMM:180,heightMM:40};assert.match(renderPlot(s),/viewBox="0 0 900 200"/);
+});
+
+test('axis labels may be empty and text colors, offsets, inset title are editable',()=>{
+ const s=example();s.title='Color';Object.assign(s.axes,{xLabel:'',yLabel:'',titleColor:'#123456',labelColor:'#654321',xLabelOffset:-5});s.legend={textColor:'#112233',border:true,borderColor:'#334455'};s.inset={enabled:true,xMin:1,xMax:3,title:'Detail <A>'};const svg=renderPlot(s);
+ assert.match(svg,/fill="#123456"/);assert.match(svg,/fill="#654321"/);assert.match(svg,/fill="#112233"/);assert.match(svg,/stroke="#334455"/);assert.match(svg,/Detail &lt;A&gt;/);assert.match(svg,/class="x-axis-label"[^>]*><\/text>/);
+});
+test('custom panel names have edit hooks and layout leaves room for a global title',()=>{
+ const s=example();s.title='Global title';s.series.push({...s.series[0],id:'b',panel:1});s.layout={mode:'grid',panelNames:['Experiment','Prediction']};const svg=renderPlot(s,{interactive:true});assert.match(svg,/data-edit="layout"/);assert.match(svg,/>Prediction<\/text>/);assert.match(svg,/class="plot-panel"[^>]* y="40"/);
+});
+test('error bands can be combined with X error bars',()=>{
+ const s=example();s.dataset.rows=[[0,1,.2,.1],[1,2,.3,.1]];Object.assign(s.series[0],{errorStyle:'band',yErrorColumn:2,xErrorColumn:3});const svg=renderPlot(s);assert.match(svg,/class="error-band"/);assert.match(svg,/class="error-bars"/);
+});
+test('unrepresentable linear ranges fail clearly instead of emitting invalid SVG',()=>{
+ const s=example();s.dataset.rows=[[-1e308,-1e308],[1e308,1e308]];assert.throws(()=>renderPlot(s),/跨度|精度/);
+});

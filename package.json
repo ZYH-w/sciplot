@@ -1,6 +1,6 @@
 {
   "name": "sciplot-local",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "private": true,
   "type": "module",
   "description": "简图 SciPlot — 本地科研绘图工作台",

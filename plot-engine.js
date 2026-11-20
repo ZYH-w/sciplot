@@ -28,40 +28,6 @@ function normalizeRange(lo, hi, fallback = [0, 1]) {
   return [lo, hi];
 }
 
-export function getPlotBounds(state) {
-  let xmin = Infinity, xmax = -Infinity, ymin = Infinity, ymax = -Infinity;
-  const barX = state.chartType === 'bar' ? new Set() : null;
-  for (const series of state.series || []) {
-    if (series.visible === false) continue;
-    for (const row of state.dataset?.rows || []) {
-      const x = row[series.xColumn ?? 0], y = row[series.yColumn ?? 1];
-      if (!finite(x) || !finite(y)) continue;
-      xmin = Math.min(xmin, x); xmax = Math.max(xmax, x);
-      ymin = Math.min(ymin, y); ymax = Math.max(ymax, y);
-      barX?.add(x);
-    }
-  }
-  let [xMin, xMax] = normalizeRange(xmin, xmax);
-  let [yMin, yMax] = normalizeRange(ymin, ymax);
-  if (state.chartType === 'bar') {
-    yMin = Math.min(0, yMin); yMax = Math.max(0, yMax);
-    const positions = [...barX].sort((a,b)=>a-b);
-    if (positions.length > 1) {
-      let spacing = Infinity;
-      for (let i=1;i<positions.length;i++) spacing = Math.min(spacing,positions[i]-positions[i-1]);
-      xMin -= spacing * .55; xMax += spacing * .55;
-    }
-  }
-  const yPadding = (yMax - yMin) * 0.07;
-  const yStep = niceStep(yMax - yMin + yPadding * 2);
-  yMin = Math.floor((yMin - yPadding) / yStep) * yStep;
-  yMax = Math.ceil((yMax + yPadding) / yStep) * yStep;
-  const axes = state.axes || {};
-  [xMin, xMax] = normalizeRange(optionalNumber(axes.xMin) ?? xMin, optionalNumber(axes.xMax) ?? xMax);
-  [yMin, yMax] = normalizeRange(optionalNumber(axes.yMin) ?? yMin, optionalNumber(axes.yMax) ?? yMax);
-  return { xMin, xMax, yMin, yMax };
-}
-
 export function makeTicks(min, max, target = 6) {
   const step = niceStep(max - min, target);
   const ticks = [];
@@ -152,202 +118,186 @@ function markerPath(type, x, y, size) {
   return `M${round(x-r)},${py}a${r},${r} 0 1,0 ${size},0a${r},${r} 0 1,0 -${size},0Z`;
 }
 
-function makeMapping(bounds, rect, axisBreak) {
-  const broken = axisBreak?.enabled && finite(Number(axisBreak.from)) && finite(Number(axisBreak.to)) && Number(axisBreak.from) > bounds.xMin && Number(axisBreak.to) < bounds.xMax && Number(axisBreak.from) < Number(axisBreak.to);
-  const from = Number(axisBreak?.from), to = Number(axisBreak?.to);
-  const gap = broken ? 25 : 0;
-  const retainedSpan = bounds.xMax - bounds.xMin - (broken ? to - from : 0);
-  const scale = (rect.w - gap) / retainedSpan;
-  const gapLeft = broken ? rect.x + (from - bounds.xMin) * scale : 0;
-  const x = value => broken && value >= to ? rect.x + (value - bounds.xMin - (to-from)) * scale + gap : rect.x + (value - bounds.xMin) * scale;
-  const y = value => rect.y + rect.h - (value - bounds.yMin) / (bounds.yMax - bounds.yMin) * rect.h;
-  const side = value => !broken ? 0 : value <= from ? 0 : value >= to ? 1 : -1;
-  return { x, y, broken, from, to, gap, gapLeft, side };
+const safeColor = (value,fallback='#ffffff') => /^#(?:[0-9a-f]{3}|[0-9a-f]{6})$/i.test(value||'')?value:fallback;
+const fmt = (n,format,digits=2) => format==='fixed'?n.toFixed(clamp(digits,0,10)):format==='scientific'?n.toExponential(clamp(digits,0,10)):labelNumber(n);
+const err = (row,column) => Number.isInteger(column)&&finite(row[column])&&row[column]>=0?row[column]:null;
+function errors(row,s){const common=err(row,s.yErrorColumn);return {x:err(row,s.xErrorColumn),lo:err(row,s.yErrorMinusColumn)??common,hi:err(row,s.yErrorPlusColumn)??common};}
+function rangeFor(lo,hi,scale,min,max,pad=false){
+ if(scale==='log'){
+  if(!finite(lo)||!finite(hi)||lo<=0){lo=1;hi=10;}
+  if(lo===hi){lo/=Math.sqrt(10);hi*=Math.sqrt(10);}
+  if(pad){const span=Math.log10(hi)-Math.log10(lo);lo=10**(Math.log10(lo)-span*.06);hi=10**(Math.log10(hi)+span*.06);}
+ }else{
+  [lo,hi]=normalizeRange(lo,hi);
+  if(!finite(hi-lo))throw new Error('数值跨度超出绘图精度，请先换算数据单位。');
+  if(pad){const step=niceStep((hi-lo)*1.14),p=(hi-lo)*.07;lo=Math.floor((lo-p)/step)*step;hi=Math.ceil((hi+p)/step)*step;}
+ }
+ lo=optionalNumber(min)??lo;hi=optionalNumber(max)??hi;
+ if(!finite(lo)||!finite(hi))throw new Error('坐标范围超出绘图精度，请先换算数据单位。');
+ if(scale==='log'&&(lo<=0||hi<=0))throw new Error('对数坐标的范围必须大于 0。');
+ if(lo>=hi)throw new Error('坐标最小值必须小于最大值。');
+ return [lo,hi];
 }
 
-function renderSeries(state, bounds, rect, mapping, clipId, miniature = false) {
-  const seriesList = (state.series || []).filter(series => series.visible !== false);
-  const chartType = state.chartType || 'line-scatter';
-  let output = `<g clip-path="url(#${clipId})" class="plot-series">`;
-  for (let seriesIndex = 0; seriesIndex < seriesList.length; seriesIndex++) {
-    const series = seriesList[seriesIndex];
-    const points = pointsFor(state, series);
-    const color = colorFor(series);
-    const width = clamp(Number(series.width) || 2, .5, 8) * (miniature ? .75 : 1);
-    const markerSize = clamp(Number(series.markerSize) || 5, 2, 16) * (miniature ? .65 : 1);
-    const dash = dashArray(series.dash, width);
-    if (chartType === 'bar') {
-      const inRange = points.filter(point => finite(point.x) && finite(point.y) && point.x >= bounds.xMin && point.x <= bounds.xMax && mapping.side(point.x) !== -1);
-      const positions = [...new Set(inRange.map(point => mapping.x(point.x)))].sort((a,b)=>a-b);
-      let spacing = rect.w / Math.max(positions.length, 1);
-      for(let i=1;i<positions.length;i++) spacing = Math.min(spacing, positions[i]-positions[i-1]);
-      const barWidth = Math.max(.7, spacing * .72 / seriesList.length);
-      const zero = mapping.y(clamp(0, bounds.yMin, bounds.yMax));
-      output += `<g data-series-id="${escapeXml(series.id)}" fill="${color}" fill-opacity=".85">`;
-      for (const point of inRange) {
-        const px = mapping.x(point.x) + (seriesIndex-seriesList.length/2)*barWidth;
-        const py = mapping.y(point.y);
-        output += `<rect x="${round(px)}" y="${round(Math.min(zero,py))}" width="${round(barWidth)}" height="${round(Math.abs(py-zero))}"/>`;
-      }
-      output += '</g>';
-      continue;
-    }
-    if (chartType !== 'scatter') {
-      let d = '', previousSide = null, open = false;
-      const linePoints=sampleCurve(points,x=>mapping.x(x)-rect.x,rect.w,mapping.side);
-      for (const point of linePoints) {
-        if (!finite(point.x) || !finite(point.y) || mapping.side(point.x) === -1) { open = false; continue; }
-        const side = mapping.side(point.x);
-        d += `${open && previousSide === side ? 'L' : 'M'}${round(mapping.x(point.x))},${round(mapping.y(point.y))}`;
-        open = true; previousSide = side;
-      }
-      output += `<path data-series-id="${escapeXml(series.id)}" d="${d}" fill="none" stroke="${color}" stroke-width="${width}"${dash ? ` stroke-dasharray="${dash}"` : ''} stroke-linejoin="round" stroke-linecap="round"/>`;
-    }
-    if (chartType === 'scatter' || chartType === 'line-scatter') {
-      const interval = chartType === 'scatter' ? 1 : Math.max(1, Math.ceil(points.length / (miniature ? 14 : 34)));
-      const marker = series.marker === 'none' && chartType === 'scatter' ? 'circle' : series.marker || 'circle';
-      output += `<g data-series-markers="${escapeXml(series.id)}">`;
-      let markersPath = '';
-      points.forEach((point,index) => {
-        if (!finite(point.x) || !finite(point.y) || mapping.side(point.x) === -1) return;
-        const connected = neighbor => neighbor && finite(neighbor.x) && finite(neighbor.y) && mapping.side(neighbor.x) === mapping.side(point.x);
-        const segmentBoundary = !connected(points[index-1]) || !connected(points[index+1]);
-        if (index % interval !== 0 && index !== points.length-1 && !segmentBoundary) return;
-        if (point.x<bounds.xMin || point.x>bounds.xMax || point.y<bounds.yMin || point.y>bounds.yMax) return;
-        if(marker!=='none')markersPath+=markerPath(marker,mapping.x(point.x),mapping.y(point.y),markerSize);
-      });
-      if(markersPath) output+=`<path d="${markersPath}" fill="white" stroke="${color}" stroke-width="${Math.max(1,width*.65)}"/>`;
-      output += '</g>';
-    }
+export function getPlotBounds(state){
+ const a=state.axes||{};let xmin=Infinity,xmax=-Infinity,ymin=Infinity,ymax=-Infinity,zmin=Infinity,zmax=-Infinity;
+ const bx=state.chartType==='bar'?new Set():null;
+ for(const s of state.series||[]){if(s.visible===false)continue;const right=s.axis==='right',scale=right?a.y2Scale:a.yScale;
+  for(const row of state.dataset?.rows||[]){const x=row[s.xColumn??0],y=row[s.yColumn??1];if(!finite(x)||!finite(y)||(a.xScale==='log'&&x<=0)||(scale==='log'&&y<=0))continue;
+   const e=s.errorStyle&&s.errorStyle!=='none'?errors(row,s):{};
+   const xlo=x-(e.x??0),xhi=x+(e.x??0),ylo=y-(e.lo??0),yhi=y+(e.hi??0);
+   xmin=Math.min(xmin,a.xScale==='log'&&xlo<=0?x:xlo);xmax=Math.max(xmax,xhi);bx?.add(x);
+   if(right){zmin=Math.min(zmin,scale==='log'&&ylo<=0?y:ylo);zmax=Math.max(zmax,yhi);}else{ymin=Math.min(ymin,scale==='log'&&ylo<=0?y:ylo);ymax=Math.max(ymax,yhi);}
   }
-  return output + '</g>';
+ }
+ if(bx?.size){if(a.yScale!=='log'){ymin=Math.min(0,ymin);ymax=Math.max(0,ymax);}const v=[...bx].sort((x,y)=>x-y);let step=v.length>1?Infinity:1;for(let i=1;i<v.length;i++)step=Math.min(step,v[i]-v[i-1]);if(a.xScale!=='log'){xmin-=step*.55;xmax+=step*.55;}}
+ const [xMin,xMax]=rangeFor(xmin,xmax,a.xScale,a.xMin,a.xMax);
+ const [yMin,yMax]=rangeFor(ymin,ymax,a.yScale,a.yMin,a.yMax,true);
+ const [y2Min,y2Max]=rangeFor(zmin,zmax,a.y2Scale,a.y2Min,a.y2Max,true);
+ return {xMin,xMax,yMin,yMax,y2Min,y2Max};
 }
 
-function clipRectangles(rect, mapping) {
-  if (!mapping.broken) return `<rect x="${rect.x}" y="${rect.y}" width="${rect.w}" height="${rect.h}"/>`;
-  return `<rect x="${rect.x}" y="${rect.y}" width="${round(mapping.gapLeft-rect.x)}" height="${rect.h}"/><rect x="${round(mapping.gapLeft+mapping.gap)}" y="${rect.y}" width="${round(rect.x+rect.w-mapping.gapLeft-mapping.gap)}" height="${rect.h}"/>`;
+function axisTicks(lo,hi,scale,manual,target=6){
+ const step=optionalNumber(manual);const logarithmic=scale==='log';
+ if(logarithmic){const l=Math.log10(lo),h=Math.log10(hi),d=step&&step>0?step:Math.max(1,Math.ceil((h-l)/target));const ticks=[];for(let v=Math.ceil(l/d)*d;v<=h+1e-10&&ticks.length<150;v+=d)ticks.push(10**v);if(!ticks.length)return [lo,hi];return ticks;}
+ if(!step||step<=0)return makeTicks(lo,hi,target);
+ if((hi-lo)/step>150)throw new Error('主刻度过密，请增大刻度间隔（每轴最多 150 个）。');
+ const out=[],first=Math.ceil(lo/step)*step;for(let i=0;i<151;i++){const v=first+i*step;if(v>hi+step*1e-8)break;out.push(Math.abs(v)<step*1e-10?0:v);}return out;
+}
+function mapper(lo,hi,start,length,scale,reverse){const transform=scale==='log'?Math.log10:v=>v;const l=transform(lo),span=transform(hi)-l;return v=>start+length*(reverse?1-(transform(v)-l)/span:(transform(v)-l)/span);}
+function mapping(bounds,r,a,br){
+ const broken=br?.enabled&&a.xScale!=='log'&&!a.xReverse&&br.from>bounds.xMin&&br.to<bounds.xMax&&br.from<br.to;
+ const gap=broken?25:0,scale=(r.w-gap)/(bounds.xMax-bounds.xMin-(broken?br.to-br.from:0));
+ const gapLeft=broken?r.x+(br.from-bounds.xMin)*scale:0;
+ return {broken,gap,gapLeft,from:br?.from,to:br?.to,
+  x:broken?v=>v>=br.to?r.x+(v-bounds.xMin-br.to+br.from)*scale+gap:r.x+(v-bounds.xMin)*scale:mapper(bounds.xMin,bounds.xMax,r.x,r.w,a.xScale,a.xReverse),
+  y:mapper(bounds.yMin,bounds.yMax,r.y+r.h,-r.h,a.yScale,a.yReverse),
+  y2:mapper(bounds.y2Min,bounds.y2Max,r.y+r.h,-r.h,a.y2Scale,a.y2Reverse),
+  side:v=>broken?(v<=br.from?0:v>=br.to?1:-1):0};
+}
+function clipRect(r,m){return !m.broken?`<rect x="${r.x}" y="${r.y}" width="${r.w}" height="${r.h}"/>`:`<rect x="${r.x}" y="${r.y}" width="${m.gapLeft-r.x}" height="${r.h}"/><rect x="${m.gapLeft+m.gap}" y="${r.y}" width="${r.x+r.w-m.gapLeft-m.gap}" height="${r.h}"/>`;}
+function edit(enabled,type,panel=0,extra=''){return enabled?` data-edit="${type}" data-panel="${panel}" ${extra} style="cursor:pointer"`:'';}
+function pointValid(p,a,s,m){return finite(p.x)&&finite(p.y)&&!(a.xScale==='log'&&p.x<=0)&&!((s.axis==='right'?a.y2Scale:a.yScale)==='log'&&p.y<=0)&&m.side(p.x)!==-1;}
+function sampleEnvelope(band,m,r){
+ if(band.length<=Math.max(3000,r.w*4))return band;
+ const selected=new Set();for(const key of ['lo','hi'])for(const p of sampleCurve(band.map(point=>({x:point.x,y:point[key],source:point})),x=>m.x(x)-r.x,r.w,m.side))if(p.source)selected.add(p.source);
+ return [...selected].sort((a,b)=>a.index-b.index);
 }
 
-function renderAxes(bounds, rect, mapping, axes, miniature = false) {
-  const fontSize = miniature ? 12 : clamp(Number(axes.fontSize)||16,10,28);
-  let xTicks = makeTicks(bounds.xMin,bounds.xMax,miniature?3:7).filter(tick=>mapping.side(tick)!==-1);
-  if (mapping.broken) xTicks = [...makeTicks(bounds.xMin,mapping.from,4), ...makeTicks(mapping.to,bounds.xMax,4)];
-  const yTicks = makeTicks(bounds.yMin,bounds.yMax,miniature?3:6);
-  let grid = '', ticks = '';
-  const gridStyle = `stroke="#E5E8EB" stroke-width="${miniature?.6:.8}"`;
-  for (const tick of xTicks) {
-    const x = round(mapping.x(tick));
-    if (axes.grid) grid += `<line x1="${x}" y1="${rect.y}" x2="${x}" y2="${rect.y+rect.h}" ${gridStyle}/>`;
-    ticks += `<path d="M${x},${rect.y+rect.h}v-${miniature?4:7}${axes.frame!==false?` M${x},${rect.y}v${miniature?4:7}`:''}"/><text x="${x}" y="${rect.y+rect.h+fontSize+10}" text-anchor="middle">${labelNumber(tick)}</text>`;
+function drawSeries(state,b,r,m,clip,interactive,panel,warnings,mini=false){
+ const a=state.axes||{},series=(state.series||[]).filter(s=>s.visible!==false),type=state.chartType||'line-scatter';let out=`<g clip-path="url(#${clip})" class="plot-series">`;
+ series.forEach((s,si)=>{
+  const color=colorFor(s),width=clamp(Number(s.width)||2,.1,20),opacity=clamp(s.opacity??1,0,1),size=clamp(s.markerSize??5,0,30),y=s.axis==='right'?m.y2:m.y;
+  const points=pointsFor(state,s),valid=p=>pointValid(p,a,s,m),hook=edit(interactive,'series',panel,`data-series-id="${escapeXml(s.id)}"`);
+  if(points.some(p=>finite(p.x)&&finite(p.y)&&((a.xScale==='log'&&p.x<=0)||((s.axis==='right'?a.y2Scale:a.yScale)==='log'&&p.y<=0))))warnings.add('对数轴已跳过非正数观测及越界误差端点');
+  if(s.errorStyle&&s.errorStyle!=='none')for(const row of state.dataset.rows){const e=errors(row,s),x=row[s.xColumn??0],v=row[s.yColumn??1];for(const col of [s.xErrorColumn,s.yErrorColumn,s.yErrorMinusColumn,s.yErrorPlusColumn])if(Number.isInteger(col)&&finite(row[col])&&row[col]<0)warnings.add('负误差值无效，已跳过对应误差端点');if((a.xScale==='log'&&e.x!==null&&x-e.x<=0)||((s.axis==='right'?a.y2Scale:a.yScale)==='log'&&e.lo!==null&&v-e.lo<=0))warnings.add('对数轴已跳过非正数观测及越界误差端点');}
+  out+=`<g opacity="${opacity}"${hook}>`;
+  const segments=[];let run=[];let previousSide=null;
+  for(const p of points){const side=m.side(p.x);if(!valid(p)||previousSide!==null&&side!==previousSide){if(run.length)segments.push(run);run=[];}if(valid(p)){run.push(p);previousSide=side;}else previousSide=null;}if(run.length)segments.push(run);
+  if(s.fill&&type!=='scatter'&&type!=='bar'){
+   const low=s.axis==='right'?b.y2Min:b.yMin,high=s.axis==='right'?b.y2Max:b.yMax,baseline=y(clamp(0,low,high));
+   for(const seg of segments){const pts=sampleCurve(seg,x=>m.x(x)-r.x,r.w,m.side);if(pts.length<2)continue;const d=pts.map((p,i)=>`${i?'L':'M'}${round(m.x(p.x))},${round(y(p.y))}`).join('')+`L${round(m.x(pts.at(-1).x))},${round(baseline)}L${round(m.x(pts[0].x))},${round(baseline)}Z`;out+=`<path class="series-fill" d="${d}" fill="${color}" fill-opacity="${clamp(s.fillOpacity??.12,0,1)}"/>`;}
   }
-  for (const tick of yTicks) {
-    const y = round(mapping.y(tick));
-    if (axes.grid) grid += `<line x1="${rect.x}" y1="${y}" x2="${rect.x+rect.w}" y2="${y}" ${gridStyle}/>`;
-    ticks += `<path d="M${rect.x},${y}h${miniature?4:7}${axes.frame!==false?` M${rect.x+rect.w},${y}h-${miniature?4:7}`:''}"/><text x="${rect.x-11}" y="${round(y+fontSize*.34)}" text-anchor="end">${labelNumber(tick)}</text>`;
+  if(s.errorStyle==='band'){
+   let monotonic=true,direction=0,last=null;for(const p of points){if(!valid(p))continue;if(last!==null&&p.x!==last){const next=Math.sign(p.x-last);if(direction&&next!==direction)monotonic=false;direction=next;}last=p.x;}
+   if(!monotonic)warnings.add('误差带要求单调 X；该曲线未绘制误差带');
+   else{let band=[];const flush=()=>{if(band.length>1){const envelope=sampleEnvelope(band,m,r);const d=envelope.map((p,i)=>`${i?'L':'M'}${round(m.x(p.x))},${round(y(p.hi))}`).join('')+envelope.slice().reverse().map(p=>`L${round(m.x(p.x))},${round(y(p.lo))}`).join('')+'Z';out+=`<path class="error-band" d="${d}" fill="${color}" fill-opacity="${clamp(s.fillOpacity??.18,0,1)}"/>`;}band=[];};let side=null;
+    points.forEach((p,i)=>{const e=errors(state.dataset.rows[i],s),lo=p.y-(e.lo??0),hi=p.y+(e.hi??0);if(!valid(p)||e.lo===null||e.hi===null||!finite(lo)||!finite(hi)||!finite(y(lo))||!finite(y(hi))||side!==null&&side!==m.side(p.x)){flush();}if(valid(p)&&e.lo!==null&&e.hi!==null&&finite(y(lo))&&finite(y(hi))){band.push({x:p.x,lo,hi,index:i});side=m.side(p.x);}else side=null;});flush();}
   }
-  if (axes.minorTicks && !miniature) {
-    const minor = (ticksList, position, direction) => {
-      let result='';
-      for(let i=1;i<ticksList.length;i++) {
-        const step=(ticksList[i]-ticksList[i-1])/2;
-        const value=ticksList[i-1]+step;
-        if(direction==='x' && mapping.side(value)===-1) continue;
-        const p=round(position(value));
-        result+=direction==='x'?`<path d="M${p},${rect.y+rect.h}v-3.5${axes.frame!==false?` M${p},${rect.y}v3.5`:''}"/>`:`<path d="M${rect.x},${p}h3.5${axes.frame!==false?` M${rect.x+rect.w},${p}h-3.5`:''}"/>`;
-      }
-      return result;
-    };
-    ticks += minor(xTicks,mapping.x,'x')+minor(yTicks,mapping.y,'y');
+  if(s.errorStyle==='bars'||s.errorStyle==='band'&&Number.isInteger(s.xErrorColumn)){
+   let d='',negative=false;const cap=clamp(s.errorCap??5,0,20)/2;
+   points.forEach((p,i)=>{if(!valid(p))return;const row=state.dataset.rows[i],e=errors(row,s),px=m.x(p.x),py=y(p.y);for(const col of [s.xErrorColumn,s.yErrorColumn,s.yErrorMinusColumn,s.yErrorPlusColumn])if(Number.isInteger(col)&&finite(row[col])&&row[col]<0)negative=true;
+    if(s.errorStyle==='bars'&&e.lo!==null&&finite(y(p.y-e.lo))){const end=y(p.y-e.lo);d+=`M${round(px)},${round(py)}V${round(end)}m-${cap},0h${cap*2}`;}
+    if(s.errorStyle==='bars'&&e.hi!==null&&finite(y(p.y+e.hi))){const end=y(p.y+e.hi);d+=`M${round(px)},${round(py)}V${round(end)}m-${cap},0h${cap*2}`;}
+    if(e.x!==null){for(const end of [p.x-e.x,p.x+e.x])if(finite(m.x(end))&&m.side(end)===m.side(p.x)){d+=`M${round(px)},${round(py)}H${round(m.x(end))}m0,-${cap}v${cap*2}`;}}
+   });if(negative)warnings.add('负误差值无效，已跳过对应误差端点');if(d)out+=`<path class="error-bars" d="${d}" fill="none" stroke="${color}" stroke-width="${Math.max(.7,width*.65)}"/>`;
   }
-  let frame = axes.frame !== false ? `<rect x="${rect.x}" y="${rect.y}" width="${rect.w}" height="${rect.h}" fill="none"/>` : `<path d="M${rect.x},${rect.y}v${rect.h}h${rect.w}" fill="none"/>`;
-  if (mapping.broken) {
-    grid = `<g clip-path="url(#${mapping.clipId})">${grid}</g>`;
-    for (const y of axes.frame!==false?[rect.y,rect.y+rect.h]:[rect.y+rect.h]) {
-      const mid=round(mapping.gapLeft+mapping.gap/2);
-      frame += `<path d="M${round(mapping.gapLeft-.7)},${y}h${mapping.gap+1.4}" stroke="white" stroke-width="4"/><path d="M${mid-7},${y+5}l6,-10 M${mid+1},${y+5}l6,-10"/>`;
-    }
+  if(type==='bar'){
+   const usable=points.filter(valid),positions=[...new Set(usable.map(p=>m.x(p.x)))].sort((x,y)=>x-y);let spacing=r.w/Math.max(1,positions.length);for(let i=1;i<positions.length;i++)spacing=Math.min(spacing,positions[i]-positions[i-1]);const bw=Math.max(.5,spacing*.72/series.length),zero=y(clamp(0,s.axis==='right'?b.y2Min:b.yMin,s.axis==='right'?b.y2Max:b.yMax));
+   for(const p of usable){const py=y(p.y),px=m.x(p.x)+(si-series.length/2)*bw;out+=`<rect x="${round(px)}" y="${round(Math.min(py,zero))}" width="${round(bw)}" height="${round(Math.abs(py-zero))}" fill="${color}"/>`;}
+  }else{
+   if(type!=='scatter'){let d='';for(const seg of segments){const ps=sampleCurve(seg,x=>m.x(x)-r.x,r.w,m.side);d+=ps.map((p,i)=>`${i?'L':'M'}${round(m.x(p.x))},${round(y(p.y))}`).join('');}const dash=dashArray(s.dash,width);out+=`<path data-series-id="${escapeXml(s.id)}" d="${d}" fill="none" stroke="${color}" stroke-width="${width}"${dash?` stroke-dasharray="${dash}"`:''} stroke-linejoin="round" stroke-linecap="round"/>`;if(interactive)out+=`<path d="${d}" fill="none" stroke="transparent" stroke-width="${Math.max(10,width)}" pointer-events="stroke"/>`;}
+   if(type==='scatter'||type==='line-scatter'){const interval=s.markerEvery>0?Math.max(1,Math.round(s.markerEvery)):type==='scatter'?1:Math.max(1,Math.ceil(points.length/(mini?14:34))),marker=s.marker==='none'&&type==='scatter'?'circle':s.marker||'circle';let d='';points.forEach((p,i)=>{if(marker==='none'||!valid(p)||p.x<b.xMin||p.x>b.xMax)return;const endpoint=!points[i-1]||!valid(points[i-1])||!points[i+1]||!valid(points[i+1]);if(i%interval&&!endpoint)return;d+=markerPath(marker,m.x(p.x),y(p.y),size);});out+=`<g data-series-markers="${escapeXml(s.id)}">${d?`<path d="${d}" fill="${s.markerFill==='series'?color:'white'}" stroke="${color}" stroke-width="${Math.max(1,width*.65)}"/>`:''}</g>`;}
   }
-  return {grid, foreground:`<g class="plot-axes" fill="#252B31" stroke="#384149" stroke-width="${miniature?.8:1.1}" font-size="${fontSize}">${frame}<g>${ticks.replace(/<text /g,'<text stroke="none" ')}</g></g>`};
+  out+='</g>';
+ });return out+'</g>';
 }
 
-function renderLegend(state, rect, fontSize, insetPosition) {
-  if (state.legend?.show === false) return '';
-  const seriesList=(state.series||[]).filter(series=>series.visible!==false);
-  if (!seriesList.length) return '';
-  const textWidth = text => [...String(text)].reduce((sum,c)=>sum+(/[^\x00-\xff]/.test(c)?fontSize:fontSize*.56),0);
-  const w=Math.min(rect.w*.55,Math.max(...seriesList.map(series=>textWidth(series.name)),40)+68);
-  const rowHeight=fontSize+12, h=seriesList.length*rowHeight+14;
-  let position=state.legend?.position||'top-left';
-  if(position===insetPosition) position=position.startsWith('top')?position.replace('top','bottom'):position.replace('bottom','top');
-  const x=position.endsWith('right')?rect.x+rect.w-w-17:rect.x+17;
-  const y=position.startsWith('bottom')?rect.y+rect.h-h-16:rect.y+16;
-  let output=`<g class="plot-legend"><rect x="${round(x)}" y="${round(y)}" width="${round(w)}" height="${round(h)}" fill="white" fill-opacity=".94" stroke="${state.legend?.border?'#69717A':'none'}" stroke-width=".8"/>`;
-  seriesList.forEach((series,index)=>{
-    const cy=y+14+fontSize*.55+index*rowHeight;
-    const color=colorFor(series), width=clamp(Number(series.width)||2,.5,8), dash=dashArray(series.dash,width);
-    if(state.chartType==='bar') output+=`<rect x="${x+11}" y="${round(cy-5)}" width="25" height="10" fill="${color}"/>`;
-    else {
-      if(state.chartType!=='scatter') output+=`<line x1="${x+10}" y1="${round(cy)}" x2="${x+40}" y2="${round(cy)}" stroke="${color}" stroke-width="${width}"${dash?` stroke-dasharray="${dash}"`:''}/>`;
-      if(state.chartType!=='line') output+=markerShape(state.chartType==='scatter'&&series.marker==='none'?'circle':series.marker||'circle',x+25,cy,clamp(Number(series.markerSize)||5,2,16),color);
-    }
-    output+=`<text x="${x+50}" y="${round(cy+fontSize*.35)}" font-size="${fontSize}" fill="#30383D">${escapeXml(series.name)}</text>`;
-  });
-  return output+'</g>';
+function drawAxes(state,b,r,m,clip,interactive,panel,mini=false){
+ const a=state.axes||{},fs=mini?12:clamp(a.fontSize||16,6,72),color=safeColor(a.axisColor,'#384149'),tc=safeColor(a.tickColor,color),gc=safeColor(a.gridColor,'#E5E8EB'),aw=clamp(a.axisWidth??1.1,.2,6),gw=clamp(a.gridWidth??.6,.1,5);
+ const right=(state.series||[]).some(s=>s.visible!==false&&s.axis==='right'),length=mini?4:7;
+ const inside=a.tickDirection!=='out',outside=a.tickDirection==='out'||a.tickDirection==='both';let grid='',fg='';
+ const sets=[['x',b.xMin,b.xMax,m.x],['y',b.yMin,b.yMax,m.y],...(right?[['y2',b.y2Min,b.y2Max,m.y2]]:[])];
+ for(const [axis,lo,hi,map]of sets){let ticks=axisTicks(lo,hi,a[axis+'Scale'],mini?'':a[axis+'Step'],mini?3:Math.max(2,Math.min(6,Math.floor((axis==='x'?r.w:r.h)/(fs*2.2)))));if(axis==='x')ticks=ticks.filter(v=>m.side(v)!==-1);
+  let group='';const tick=(v,minor=false)=>{const p=map(v);if(!finite(p))return;const len=minor?length*.5:length;const start=inside?-len:0,end=outside?len:0;
+   if(axis==='x'){group+=`<path d="M${round(p)},${r.y+r.h+start}v${end-start}"/>`;if(a.frame!==false)group+=`<path d="M${round(p)},${r.y-end}v${end-start}"/>`;if(!minor)group+=`<text stroke="none" x="${round(p)}" y="${r.y+r.h+fs+10+(outside?length:0)}" text-anchor="middle">${fmt(v,a.xFormat,a.digits)}</text>`;}
+   else{const edge=axis==='y'?r.x:r.x+r.w,sign=axis==='y'?-1:1;group+=`<path d="M${edge+sign*start},${round(p)}h${sign*(end-start)}"/>`;if(!minor)group+=`<text stroke="none" x="${edge+sign*(11+(outside?length:0))}" y="${round(p+fs*.34)}" text-anchor="${axis==='y'?'end':'start'}">${fmt(v,a[axis+'Format'],a.digits)}</text>`;}
+  };
+  for(let i=0;i<ticks.length;i++){const v=ticks[i];tick(v);if(a.grid&&axis!=='y2'){const p=map(v);grid+=axis==='x'?`<line x1="${round(p)}" y1="${r.y}" x2="${round(p)}" y2="${r.y+r.h}"/>`:`<line x1="${r.x}" y1="${round(p)}" x2="${r.x+r.w}" y2="${round(p)}"/>`;}
+   if(a.minorTicks&&!mini&&i){const mid=a[axis+'Scale']==='log'?Math.sqrt(v*ticks[i-1]):(v+ticks[i-1])/2;if(axis!=='x'||m.side(mid)!==-1)tick(mid,true);}
+  }
+  fg+=`<g fill="${tc}" stroke="${tc}" stroke-width="${aw}" font-size="${fs}"${edit(interactive,axis==='x'?'x-axis':axis==='y2'?'y2-axis':'y-axis',panel)}>${group}</g>`;
+ }
+ let frame=a.frame!==false?`<rect x="${r.x}" y="${r.y}" width="${r.w}" height="${r.h}"/>`:`<path d="M${r.x},${r.y}v${r.h}h${r.w}${right?`v-${r.h}`:''}"/>`;
+ if(m.broken){for(const y of a.frame!==false?[r.y,r.y+r.h]:[r.y+r.h]){const mid=m.gapLeft+m.gap/2;frame+=`<path d="M${m.gapLeft-1},${y}h${m.gap+2}" stroke="white" stroke-width="4"/><path d="M${mid-7},${y+5}l6,-10 M${mid+1},${y+5}l6,-10"/>`;}}
+ if(interactive){fg+=`<path d="M${r.x},${r.y+r.h}h${r.w}" stroke="transparent" stroke-width="12" fill="none"${edit(true,'x-axis',panel)}/><path d="M${r.x},${r.y}v${r.h}" stroke="transparent" stroke-width="12" fill="none"${edit(true,'y-axis',panel)}/>`;}
+ return {grid:`<g stroke="${gc}" stroke-width="${gw}" clip-path="url(#${clip})">${grid}</g>`,axes:`<g fill="none" stroke="${color}" stroke-width="${aw}">${frame}</g>${fg}`};
 }
 
-function getInsetBounds(state, mainBounds) {
-  const inset=state.inset||{};
-  const xMin=optionalNumber(inset.xMin),xMax=optionalNumber(inset.xMax);
-  if(xMin===null||xMax===null||xMin>=xMax||xMax<=mainBounds.xMin||xMin>=mainBounds.xMax) return null;
-  let ymin=Infinity,ymax=-Infinity;
-  for(const series of state.series||[]) {
-    if(series.visible===false) continue;
-    for(const row of state.dataset?.rows||[]) {
-      const x=row[series.xColumn??0],y=row[series.yColumn??1];
-      if(finite(x)&&finite(y)&&x>=xMin&&x<=xMax) {ymin=Math.min(ymin,y);ymax=Math.max(ymax,y);}
-    }
-  }
-  let [yMin,yMax]=normalizeRange(ymin,ymax,[mainBounds.yMin,mainBounds.yMax]);
-  const pad=(yMax-yMin)*.13;
-  [yMin,yMax]=normalizeRange(optionalNumber(inset.yMin)??yMin-pad,optionalNumber(inset.yMax)??yMax+pad);
-  return {xMin,xMax,yMin,yMax};
+function drawLegend(state,r,interactive,panel){
+ const l=state.legend||{};if(l.show===false)return '';const list=(state.series||[]).filter(s=>s.visible!==false);if(!list.length)return '';
+ const fs=clamp(l.fontSize??state.axes?.fontSize??16,6,48),row=fs+10,textWidth=t=>[...String(t)].reduce((n,c)=>n+(c.charCodeAt(0)>255?fs:fs*.56),0);
+ const w=Math.min(r.w*.85,Math.max(...list.map(s=>textWidth(s.name)),30)+66),h=list.length*row+12;let pos=l.position||'top-left';if(state.inset?.enabled&&state.inset.position===pos)pos=pos.startsWith('top')?pos.replace('top','bottom'):pos.replace('bottom','top');
+ const x=pos==='custom'?r.x+clamp(l.x??5,0,100)/100*Math.max(0,r.w-w):pos.endsWith('right')?r.x+r.w-w-14:r.x+14,y=pos==='custom'?r.y+clamp(l.y??5,0,100)/100*Math.max(0,r.h-h):pos.startsWith('bottom')?r.y+r.h-h-14:r.y+14;
+ let out=`<g class="plot-legend"${edit(interactive,'legend',panel)}><rect x="${round(x)}" y="${round(y)}" width="${round(w)}" height="${round(h)}" fill="${safeColor(l.background)}" fill-opacity="${clamp(l.opacity??.94,0,1)}" stroke="${l.border?safeColor(l.borderColor,'#69717a'):'none'}" stroke-width=".8"/>`;
+ list.forEach((s,i)=>{const cy=y+12+fs*.55+i*row,c=colorFor(s),sw=clamp(s.width||2,.1,20),dash=dashArray(s.dash,sw);out+=`<g opacity="${clamp(s.opacity??1,0,1)}">`;if(state.chartType==='bar')out+=`<rect x="${x+10}" y="${cy-5}" width="30" height="10" fill="${c}"/>`;else{if(state.chartType!=='scatter')out+=`<line x1="${x+10}" y1="${cy}" x2="${x+40}" y2="${cy}" stroke="${c}" stroke-width="${sw}"${dash?` stroke-dasharray="${dash}"`:''}/>`;if(state.chartType!=='line'){const marker=s.marker==='none'&&state.chartType==='scatter'?'circle':s.marker||'circle';out+=markerShape(marker,x+25,cy,clamp(s.markerSize??5,0,30),c).replace('fill="white"',`fill="${s.markerFill==='series'?c:'white'}"`);}}out+=`</g><text x="${x+50}" y="${cy+fs*.35}" font-size="${fs}" fill="${safeColor(l.textColor,'#30383d')}">${escapeXml(s.name)}</text>`;});return out+'</g>';
 }
 
-export function renderPlot(state, {width=900,height=620,interactive=false}={}) {
-  width=clamp(Number(width)||900,320,6000); height=clamp(Number(height)||620,260,6000);
-  const axes=state.axes||{},fontSize=clamp(Number(axes.fontSize)||16,10,28);
-  const margin={left:Math.max(82,fontSize*5),right:32,top:state.title?64:35,bottom:Math.max(77,fontSize*4.8)};
-  const rect={x:margin.left,y:margin.top,w:width-margin.left-margin.right,h:height-margin.top-margin.bottom};
-  const bounds=getPlotBounds(state),mapping=makeMapping(bounds,rect,state.axisBreak);
-  const id=`sciplot-${++renderNumber}`,clipId=`${id}-clip`;
-  mapping.clipId=clipId;
-  const fontFamily=escapeXml(axes.fontFamily||'Arial, Microsoft YaHei, sans-serif');
-  const insetBounds=state.inset?.enabled?getInsetBounds(state,bounds):null;
-  const insetPosition=insetBounds?(state.inset.position||'top-right'):null;
-  const renderedAxes=renderAxes(bounds,rect,mapping,axes);
-  let output=`<svg xmlns="http://www.w3.org/2000/svg" class="scientific-plot" viewBox="0 0 ${width} ${height}" width="${width}" height="${height}" role="img" aria-labelledby="${id}-title" font-family="${fontFamily}" style="background:#fff"><title id="${id}-title">${escapeXml(state.title||'科研数据图')}</title><desc>${escapeXml(axes.xLabel||'X')}；${escapeXml(axes.yLabel||'Y')}。${(state.series||[]).filter(s=>s.visible!==false).length} 组数据${mapping.broken?'，X 轴省略区间 '+mapping.from+' 至 '+mapping.to:''}。</desc><defs><clipPath id="${clipId}">${clipRectangles(rect,mapping)}</clipPath></defs><rect width="${width}" height="${height}" fill="white"/>`;
-  if(state.title) output+=`<text x="${width/2}" y="30" text-anchor="middle" font-size="${fontSize+3}" font-weight="600" fill="#26323A">${escapeXml(state.title)}</text>`;
-  output+=renderedAxes.grid;
-  if(insetBounds && !mapping.broken) {
-    const x1=clamp(mapping.x(insetBounds.xMin),rect.x,rect.x+rect.w),x2=clamp(mapping.x(insetBounds.xMax),rect.x,rect.x+rect.w);
-    const y1=clamp(mapping.y(insetBounds.yMax),rect.y,rect.y+rect.h),y2=clamp(mapping.y(insetBounds.yMin),rect.y,rect.y+rect.h);
-    output+=`<rect class="inset-region" x="${round(x1)}" y="${round(y1)}" width="${round(x2-x1)}" height="${round(y2-y1)}" fill="#0F8A83" fill-opacity=".045" stroke="#849AA1" stroke-width=".9" stroke-dasharray="4 4"/>`;
-  }
-  output+=renderSeries(state,bounds,rect,mapping,clipId)+renderedAxes.foreground;
-  output+=`<g fill="#252B31" font-size="${fontSize+2}"><text class="x-axis-label" x="${round(rect.x+rect.w/2)}" y="${height-18}" text-anchor="middle">${escapeXml(axes.xLabel||'X')}</text><text class="y-axis-label" transform="translate(25 ${round(rect.y+rect.h/2)}) rotate(-90)" text-anchor="middle">${escapeXml(axes.yLabel||'Y')}</text></g>`;
-  output+=renderLegend(state,rect,fontSize,insetPosition);
-  if(insetBounds) {
-    const iw=Math.min(224,rect.w*.33),ih=Math.min(148,rect.h*.34);
-    const ir={x:insetPosition.endsWith('right')?rect.x+rect.w-iw-24:rect.x+55,y:insetPosition.startsWith('bottom')?rect.y+rect.h-ih-42:rect.y+34,w:iw,h:ih};
-    const im=makeMapping(insetBounds,ir),ic=`${id}-inset`;
-    const ia=renderAxes(insetBounds,ir,im,{...axes,grid:true,frame:true,minorTicks:false},true);
-    if(!mapping.broken) {
-      const sx=clamp(mapping.x(insetBounds.xMax),rect.x,rect.x+rect.w),sy=clamp(mapping.y(insetBounds.yMax),rect.y,rect.y+rect.h);
-      output+=`<path class="inset-connector" d="M${round(sx)},${round(sy)} L${round(ir.x+ir.w/2)},${round(ir.y+ir.h)}" fill="none" stroke="#91A2A8" stroke-width=".8" stroke-dasharray="4 4"/>`;
-    }
-    output+=`<g class="plot-inset"><rect x="${ir.x-37}" y="${ir.y-23}" width="${ir.w+51}" height="${ir.h+56}" fill="white" fill-opacity=".98"/><defs><clipPath id="${ic}">${clipRectangles(ir,im)}</clipPath></defs><text x="${ir.x}" y="${ir.y-11}" font-size="12" fill="#6B7C84">局部放大</text>${ia.grid}${renderSeries(state,insetBounds,ir,im,ic,true)}${ia.foreground}</g>`;
-  }
-  if(!(state.series||[]).some(s=>s.visible!==false)) output+=`<text x="${rect.x+rect.w/2}" y="${rect.y+rect.h/2}" text-anchor="middle" font-size="15" fill="#7E8B92">请显示至少一组数据</text>`;
-  if(interactive) output+=`<rect id="plot-hit-area" x="${rect.x}" y="${rect.y}" width="${rect.w}" height="${rect.h}" fill="transparent" data-x="${rect.x}" data-y="${rect.y}" data-width="${rect.w}" data-height="${rect.h}" data-x-min="${bounds.xMin}" data-x-max="${bounds.xMax}" data-y-min="${bounds.yMin}" data-y-max="${bounds.yMax}" data-break-from="${mapping.broken?mapping.from:''}" data-break-to="${mapping.broken?mapping.to:''}" data-break-gap="${mapping.gap}" style="touch-action:none"/>`;
-  return output+'</svg>';
+function drawAnnotations(state,width,height,r,m,interactive,panel,clip){let out='';for(const n of state.annotations||[]){if((n.panel??0)!==panel)continue;
+ const page=state._annotationPage||{width,height,x:0,y:0},x=clamp(n.x??50,0,100)*page.width/100-page.x,y=clamp(n.y??50,0,100)*page.height/100-page.y,x2=clamp(n.x2??70,0,100)*page.width/100-page.x,y2=clamp(n.y2??60,0,100)*page.height/100-page.y,c=safeColor(n.color,'#333333'),sw=clamp(n.width??1.5,.1,10),dash=dashArray(n.dash,sw),fs=clamp(n.fontSize??16,6,72),hook=edit(interactive,'annotation',panel,`data-annotation-id="${escapeXml(n.id)}"`);
+ let shape='';if(n.type==='text')shape=`<text x="${x}" y="${y}" fill="${c}" stroke="none" font-size="${fs}" transform="rotate(${clamp(n.angle??0,0,360)} ${x} ${y})">${escapeXml(n.text)}</text>`;
+ else if(n.type==='rect')shape=`<rect x="${Math.min(x,x2)}" y="${Math.min(y,y2)}" width="${Math.abs(x2-x)}" height="${Math.abs(y2-y)}" fill="${n.fill==='none'||!n.fill?'none':safeColor(n.fill)}" fill-opacity=".2"/>`;
+ else if(n.type==='hline'||n.type==='vline'){const v=n.type==='hline'?(n.axis==='right'?m.y2(n.value):m.y(n.value)):m.x(n.value);if(!finite(v))continue;shape=n.type==='hline'?`<path d="M${r.x},${round(v)}h${r.w}"/>`:`<path d="M${round(v)},${r.y}v${r.h}"/>`;if(n.text)shape+=`<text x="${n.type==='hline'?r.x+8:round(v)+8}" y="${n.type==='hline'?round(v)-5:r.y+fs+6}" stroke="none" fill="${c}" font-size="${fs}">${escapeXml(n.text)}</text>`;}
+ else if(n.type==='bracket')shape=`<path d="M${x},${y+8}v-8H${x2}v8"/><text x="${(x+x2)/2}" y="${y-6}" text-anchor="middle" stroke="none" fill="${c}" font-size="${fs}">${escapeXml(n.text||'*')}</text>`;
+ else{shape=`<path d="M${x},${y}L${x2},${y2}"/>`;if(n.type==='arrow'){const theta=Math.atan2(y2-y,x2-x),len=9+sw;shape+=`<path d="M${x2-len*Math.cos(theta-.45)},${y2-len*Math.sin(theta-.45)}L${x2},${y2}L${x2-len*Math.cos(theta+.45)},${y2-len*Math.sin(theta+.45)}"/>`;}}
+ out+=`<g class="plot-annotation" fill="none" stroke="${c}" stroke-width="${sw}"${dash?` stroke-dasharray="${dash}"`:''}${['hline','vline'].includes(n.type)?` clip-path="url(#${clip})"`:''}${hook}>${shape}</g>`;
+ }return out;}
+
+function drawPanel(state,width,height,interactive,panel,warnings){
+ const a=state.axes||{},right=(state.series||[]).some(s=>s.visible!==false&&s.axis==='right'),fs=clamp(a.fontSize||16,6,72),ls=clamp(a.labelSize??fs+2,6,72),r={x:Math.max(66,fs*4.8),y:state.title?60:Math.min(32,height*.11),w:0,h:0};r.w=width-r.x-(right?Math.max(72,fs*5):30);r.h=height-r.y-Math.max(Math.min(74,height*.24),fs*2.8);
+ if(r.w<80||r.h<55)throw new Error('子图空间不足，请增大画布尺寸或减少字号。');
+ const b=getPlotBounds(state),br=state.axisBreak;let localBreak=br;if(br?.enabled&&(a.xScale==='log'||a.xReverse)){warnings.add('断轴不支持对数或反向 X；当前未显示断轴');localBreak={enabled:false};}
+ if(br?.enabled&&!(br.from>b.xMin&&br.to<b.xMax&&br.from<br.to)){warnings.add('断轴区间须位于 X 轴范围内部；当前未显示断轴');localBreak={enabled:false};}
+ const m=mapping(b,r,a,localBreak),id=`sciplot-${++renderNumber}`,clip=`${id}-clip`,axis=drawAxes(state,b,r,m,clip,interactive,panel);
+ let out=`<defs><clipPath id="${clip}">${clipRect(r,m)}</clipPath></defs>`;
+ if(interactive)out+=`<rect id="${panel===0?'plot-hit-area':`plot-hit-area-${panel}`}" x="${r.x}" y="${r.y}" width="${r.w}" height="${r.h}" fill="transparent" data-panel="${panel}" data-x="${r.x}" data-y="${r.y}" data-width="${r.w}" data-height="${r.h}" data-x-min="${b.xMin}" data-x-max="${b.xMax}" data-y-min="${b.yMin}" data-y-max="${b.yMax}" data-x-scale="${a.xScale||'linear'}" data-y-scale="${a.yScale||'linear'}" data-x-reverse="${!!a.xReverse}" data-y-reverse="${!!a.yReverse}" data-break-from="${m.broken?m.from:''}" data-break-to="${m.broken?m.to:''}" data-break-gap="${m.gap}"/>`;
+ if(state.title)out+=`<text x="${width/2}" y="29" text-anchor="middle" font-size="${clamp(a.titleSize??fs+3,6,96)}" font-weight="600" fill="${safeColor(a.titleColor,'#26323a')}"${edit(interactive,'title',panel)}>${escapeXml(state.title)}</text>`;
+ out+=axis.grid+drawSeries(state,b,r,m,clip,interactive,panel,warnings)+axis.axes;
+ out+=`<g fill="${safeColor(a.labelColor,'#252b31')}" font-size="${ls}"><text class="x-axis-label" x="${r.x+r.w/2}" y="${height-17+(a.xLabelOffset||0)}" text-anchor="middle"${edit(interactive,'x-label',panel)}>${escapeXml(a.xLabel??'X')}</text><text class="y-axis-label" transform="translate(${23+(a.yLabelOffset||0)} ${r.y+r.h/2}) rotate(-90)" text-anchor="middle"${edit(interactive,'y-label',panel)}>${escapeXml(a.yLabel??'Y')}</text>${right?`<text transform="translate(${width-16+(a.y2LabelOffset||0)} ${r.y+r.h/2}) rotate(-90)" text-anchor="middle"${edit(interactive,'y2-label',panel)}>${escapeXml(a.y2Label??'Y₂')}</text>`:''}</g>`;
+ out+=drawLegend(state,r,interactive,panel);
+ if(state.inset?.enabled){const ins=state.inset,lo=optionalNumber(ins.xMin),hi=optionalNumber(ins.xMax);if(lo!==null&&hi!==null&&lo<hi&&hi>b.xMin&&lo<b.xMax){
+   const wi=clamp(ins.width??30,10,80)/100*r.w,he=clamp(ins.height??30,10,80)/100*r.h,pos=ins.position||'top-right';const ir={x:pos==='custom'?r.x+clamp(ins.x??65,0,100)/100*(r.w-wi):pos.endsWith('right')?r.x+r.w-wi-24:r.x+48,y:pos==='custom'?r.y+clamp(ins.y??8,0,100)/100*(r.h-he):pos.startsWith('bottom')?r.y+r.h-he-36:r.y+32,w:wi,h:he};
+   const ids={...state,dataset:{...state.dataset,rows:state.dataset.rows.filter(row=>(state.series||[]).some(s=>finite(row[s.xColumn??0])&&row[s.xColumn??0]>=lo&&row[s.xColumn??0]<=hi))},axes:{...a,xMin:lo,xMax:hi,yMin:ins.yMin??'',yMax:ins.yMax??'',y2Min:'',y2Max:'',xStep:'',yStep:'',y2Step:'',fontSize:12},axisBreak:{enabled:false}};
+   const ib=getPlotBounds(ids),im=mapping(ib,ir,ids.axes),ic=`${id}-inset`,ia=drawAxes(ids,ib,ir,im,ic,false,panel,true);
+   if(!m.broken){const x1=clamp(m.x(lo),r.x,r.x+r.w),x2=clamp(m.x(hi),r.x,r.x+r.w),y1=clamp(m.y(ib.yMax),r.y,r.y+r.h),y2=clamp(m.y(ib.yMin),r.y,r.y+r.h);if([x1,x2,y1,y2].every(finite))out+=`<rect class="inset-region" x="${Math.min(x1,x2)}" y="${Math.min(y1,y2)}" width="${Math.abs(x2-x1)}" height="${Math.abs(y2-y1)}" fill="#208e85" fill-opacity=".04" stroke="#849aa1" stroke-dasharray="4 4"/><path class="inset-connector" d="M${x2},${y1}L${ir.x+ir.w/2},${ir.y+ir.h}" stroke="#849aa1" stroke-dasharray="4 4" fill="none"/>`;}
+   out+=`<g class="plot-inset"${edit(interactive,'inset',panel)}><rect x="${ir.x-35}" y="${ir.y-23}" width="${ir.w+65}" height="${ir.h+58}" fill="white"/><defs><clipPath id="${ic}">${clipRect(ir,im)}</clipPath></defs><text x="${ir.x}" y="${ir.y-10}" font-size="12" fill="#6b7c84">${escapeXml(ins.title??'局部放大')}</text>${ia.grid}${drawSeries(ids,ib,ir,im,ic,false,panel,warnings,true)}${ia.axes}</g>`;
+  }else warnings.add('局部放大范围无效或不在主图范围内');}
+ out+=drawAnnotations(state,width,height,r,m,interactive,panel,clip);
+ if(!(state.series||[]).some(s=>s.visible!==false))out+=`<text x="${r.x+r.w/2}" y="${r.y+r.h/2}" text-anchor="middle" font-size="15" fill="#7E8B92">请显示至少一组数据</text>`;
+ return out;
 }
+
+/** Scientific SVG renderer. Interactive hit areas are omitted from exports. */
+export function renderPlot(state,options={}){
+ const width=clamp(Number(options.width)||900,320,10000),ratio=(state.figure?.heightMM||62)/(state.figure?.widthMM||90),height=Number(options.height)||width*ratio,interactive=!!options.interactive,warnings=new Set(),mode=state.layout?.mode||'single';
+ let body='';if(mode==='single')body=drawPanel(state,width,height,interactive,0,warnings);
+ else{const panels=[...new Set((state.series||[]).map(s=>s.panel??0))].sort((a,b)=>a-b);if(!panels.length)panels.push(0);const cols=mode==='grid'&&panels.length>1?2:1,rows=Math.ceil(panels.length/cols),top=state.title?40:0,pw=width/cols,ph=(height-top)/rows;
+  if(state.inset?.enabled||state.axisBreak?.enabled)warnings.add('多子图暂不支持局部放大或断轴；当前已停用');
+  const bounds=state.layout?.shareX?getPlotBounds(state):null;
+  panels.forEach((p,i)=>{const local={...state,_annotationPage:{width,height,x:(i%cols)*pw,y:top+Math.floor(i/cols)*ph},legend:{...state.legend,fontSize:(state.legend?.fontSize??state.axes?.fontSize??16)},series:state.series.filter(s=>(s.panel??0)===p),axes:{...state.axes,fontSize:(state.axes?.fontSize??16),labelSize:(state.axes?.labelSize??18),...(bounds?{xMin:bounds.xMin,xMax:bounds.xMax}:{})},inset:{enabled:false},axisBreak:{enabled:false},annotations:(state.annotations||[]).filter(n=>(n.panel??0)===p),title:''};body+=`<svg class="plot-panel" overflow="visible" data-panel="${p}" x="${(i%cols)*pw}" y="${top+Math.floor(i/cols)*ph}" width="${pw}" height="${ph}" viewBox="0 0 ${pw} ${ph}">${drawPanel(local,pw,ph,interactive,p,warnings)}${state.layout?.panelLabels!==false?`<text x="10" y="20" font-size="16" font-weight="600"${edit(interactive,'layout',p)}>${escapeXml(state.layout?.panelNames?.[p]??`(${String.fromCharCode(97+i)})`)}</text>`:''}</svg>`;});
+  if(state.title)body+=`<text x="${width/2}" y="23" text-anchor="middle" font-size="${state.axes?.titleSize||21}" fill="${safeColor(state.axes?.titleColor,'#26323a')}"${edit(interactive,'title')}>${escapeXml(state.title)}</text>`;
+ }
+ if(warnings.size)body+=`<g class="plot-warnings"><rect x="4" y="${height-19}" width="${width-8}" height="18" fill="white" fill-opacity=".94"/><text x="8" y="${height-6}" fill="#986129" font-family="Arial, Microsoft YaHei, sans-serif" font-size="11">${escapeXml([...warnings].join('；'))}</text></g>`;
+ return `<svg xmlns="http://www.w3.org/2000/svg" class="scientific-plot" viewBox="0 0 ${width} ${height}" width="${width}" height="${height}" role="img" aria-label="${escapeXml(state.title||'科研数据图')}" font-family="${escapeXml(state.axes?.fontFamily||'Arial, Microsoft YaHei, sans-serif')}"><title>${escapeXml(state.title||'科研数据图')}</title><rect width="${width}" height="${height}" fill="${safeColor(state.figure?.background)}"/>${body}</svg>`;
+}
+

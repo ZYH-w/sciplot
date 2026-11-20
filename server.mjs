@@ -16,7 +16,7 @@ const shouldOpen = process.argv.includes('--open');
 const rootFiles = new Set([
   'index.html', 'app.js', 'style.css', 'styles.css', 'data-core.js',
   'plot-engine.js', 'excel-import.js', 'export-utils.js', 'data-processing.js',
-  'processing-ui.js', 'favicon.svg', 'icon.svg',
+  'processing-ui.js', 'publication-utils.js', 'analysis-core.js', 'analysis-ui.js', 'worksheet-ui.js', 'figure-editor.js', 'batch-core.js', 'batch-ui.js', 'favicon.svg', 'icon.svg',
 ]);
 const mime = {
   '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8',
