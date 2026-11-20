@@ -1,0 +1,14 @@
+node_modules/
+.DS_Store
+Thumbs.db
+*.log
+.server*
+.cache/
+.tmp/
+desktop/packages/
+desktop/.packages/
+desktop/obj/
+desktop/bin/
+release/
+artifacts/
+简图-SciPlot.html

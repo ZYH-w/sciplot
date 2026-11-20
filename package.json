@@ -1,0 +1,16 @@
+{
+  "name": "sciplot-local",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "简图 SciPlot — 本地科研绘图工作台",
+  "scripts": {
+    "start": "node server.mjs",
+    "dev": "node server.mjs",
+    "test": "node --test *.test.mjs",
+    "build": "node build-standalone.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
